@@ -1,0 +1,38 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36202.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ControlServer", "ControlServer\ControlServer.csproj", "{6CE06919-E3FA-41AA-A28C-69C3B1D34CC4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ControlClient", "ControlClient\ControlClient.csproj", "{74FD4046-B9A5-4649-BBC9-EE28F7C11717}"
+EndProject
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "NetWork", "NetWork\NetWork.shproj", "{0ECB9110-95A7-4A26-A43B-D716A3B3FFEC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6CE06919-E3FA-41AA-A28C-69C3B1D34CC4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6CE06919-E3FA-41AA-A28C-69C3B1D34CC4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6CE06919-E3FA-41AA-A28C-69C3B1D34CC4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6CE06919-E3FA-41AA-A28C-69C3B1D34CC4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{74FD4046-B9A5-4649-BBC9-EE28F7C11717}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{74FD4046-B9A5-4649-BBC9-EE28F7C11717}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{74FD4046-B9A5-4649-BBC9-EE28F7C11717}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{74FD4046-B9A5-4649-BBC9-EE28F7C11717}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {90CB2439-D603-43DB-B493-52FDA288B976}
+	EndGlobalSection
+	GlobalSection(SharedMSBuildProjectFiles) = preSolution
+		NetWork\NetWork.projitems*{0ecb9110-95a7-4a26-a43b-d716a3b3ffec}*SharedItemsImports = 13
+		NetWork\NetWork.projitems*{6ce06919-e3fa-41aa-a28c-69c3b1d34cc4}*SharedItemsImports = 5
+		NetWork\NetWork.projitems*{74fd4046-b9a5-4649-bbc9-ee28f7c11717}*SharedItemsImports = 5
+	EndGlobalSection
+EndGlobal
