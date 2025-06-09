@@ -46,8 +46,9 @@
             infoBox.Location = new Point(42, 170);
             infoBox.Multiline = true;
             infoBox.Name = "infoBox";
-            infoBox.Size = new Size(292, 76);
+            infoBox.Size = new Size(746, 268);
             infoBox.TabIndex = 1;
+            infoBox.TextChanged += infoBox_TextChanged;
             // 
             // Form1
             // 
