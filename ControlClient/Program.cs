@@ -22,7 +22,11 @@ class TcpClientExample {
         client.Connect("127.0.0.1", 11451);
 
         // 发送文本消息（加密）
-        client.SendPacket("MSG", "Hello, server!", true);
+        //while (true) {
+            client.SendPacket("MSG", "Hello, server!", false);
+            Thread.Sleep(1000); // 每秒发送一次
+        //}
+        
 
         // 发送文件（不加密）
         //byte[] fileData = File.ReadAllBytes("large_file.dat");

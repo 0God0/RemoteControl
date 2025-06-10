@@ -256,7 +256,7 @@ namespace NetWork {
 
             private void ProcessReceivedData(List<byte> receivedData) {
                 // 需要至少8字节才能解析头部 (1+1+2+4=8字节)
-                while (receivedData.Count >= 8) {
+                while (receivedData.Count >= 4) {
                     // 解析数据包类型
                     byte packetType = receivedData[0];
                     bool isBinary = packetType == 1;
@@ -267,10 +267,18 @@ namespace NetWork {
                     // 解析标记长度
                     ushort markerLength = BitConverter.ToUInt16(receivedData.ToArray(), 2);
 
-                    // 解析负载长度
-                    int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), 4);
+                    // 计算负载长度字段的偏移量
+                    int payloadLengthOffset = 4 + markerLength;
 
-                    // 计算整个数据包长度 (8字节头部 + 标记长度 + 负载长度)
+                    // 检查是否有足够的数据读取负载长度字段（4字节）
+                    if (receivedData.Count < payloadLengthOffset + 4) {
+                        return;
+                    }
+
+                    // 解析负载长度
+                    int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), payloadLengthOffset);
+
+                    // 计算整个数据包长度 (8 + markerLength + payloadLength)
                     int totalLength = 8 + markerLength + payloadLength;
 
                     // 如果数据不足，等待更多数据
@@ -284,8 +292,9 @@ namespace NetWork {
                     string packetMarker = Encoding.UTF8.GetString(markerBytes);
 
                     // 提取负载
+                    int payloadStart = payloadLengthOffset + 4;
                     byte[] payload = new byte[payloadLength];
-                    receivedData.CopyTo(8 + markerLength, payload, 0, payloadLength);
+                    receivedData.CopyTo(payloadStart, payload, 0, payloadLength);
 
                     // 如果需要解密
                     if (isEncrypted && decryptor != null) {
@@ -711,7 +720,7 @@ namespace NetWork {
 
                 private void ProcessReceivedData(List<byte> receivedData) {
                     // 需要至少8字节才能解析头部 (1+1+2+4=8字节)
-                    while (receivedData.Count >= 8) {
+                    while (receivedData.Count >= 4) {
                         // 解析数据包类型
                         byte packetType = receivedData[0];
                         bool isBinary = packetType == 1;
@@ -722,10 +731,18 @@ namespace NetWork {
                         // 解析标记长度
                         ushort markerLength = BitConverter.ToUInt16(receivedData.ToArray(), 2);
 
-                        // 解析负载长度
-                        int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), 4);
+                        // 计算负载长度字段的偏移量
+                        int payloadLengthOffset = 4 + markerLength;
 
-                        // 计算整个数据包长度 (8字节头部 + 标记长度 + 负载长度)
+                        // 检查是否有足够的数据读取负载长度字段（4字节）
+                        if (receivedData.Count < payloadLengthOffset + 4) {
+                            return;
+                        }
+
+                        // 解析负载长度
+                        int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), payloadLengthOffset);
+
+                        // 计算整个数据包长度 (8 + markerLength + payloadLength)
                         int totalLength = 8 + markerLength + payloadLength;
 
                         // 如果数据不足，等待更多数据
@@ -739,8 +756,9 @@ namespace NetWork {
                         string packetMarker = Encoding.UTF8.GetString(markerBytes);
 
                         // 提取负载
+                        int payloadStart = payloadLengthOffset + 4;
                         byte[] payload = new byte[payloadLength];
-                        receivedData.CopyTo(8 + markerLength, payload, 0, payloadLength);
+                        receivedData.CopyTo(payloadStart, payload, 0, payloadLength);
 
                         // 如果需要解密
                         if (isEncrypted && decryptor != null) {

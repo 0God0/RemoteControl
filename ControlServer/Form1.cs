@@ -1,5 +1,6 @@
 using Microsoft.VisualBasic.Devices;
 using NetWork;
+using System.Diagnostics;
 using System.Text;
 
 namespace ControlServer
@@ -23,21 +24,23 @@ namespace ControlServer
                 data => CAes.AesDecrypt(data, key)
             );
 
-            // 注册连接处理器
-            server.RegisterConnectionHandler(client =>
-                infoBox.Text += ($"Client connected: {client.RemoteEndPoint}"));
+            server.RegisterConnectionHandler(client => {
+                infoBox.Text += ($"Client connected: {client.RemoteEndPoint}" + Environment.NewLine);
+                Debug.WriteLine($"Client connected: {client.RemoteEndPoint}" + Environment.NewLine);
+            });
+                
 
-            // 注册文本消息处理器
             server.RegisterHandler("MSG", (client, marker, payload) =>
             {
-                infoBox.Text+=($"Received from {client.RemoteEndPoint}: {payload}");
-                //server.SendToClient(client.Id, "REPLY", $"Echo: {payload}", true); // 加密回复
+                infoBox.Text+=($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
+                Debug.WriteLine($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
+                server.SendToClient(client.Id, "REPLY", $"Echo: {payload}", true);
             });
 
             // 注册文件传输处理器
             server.RegisterBytesHandler("FILE", (client, marker, data) =>
             {
-                Console.WriteLine($"Received file ({data.Length} bytes) from {client.RemoteEndPoint}");
+                Console.WriteLine($"Received file ({data.Length} bytes) from {client.RemoteEndPoint}"+Environment.NewLine);
                 // 保存文件
                 File.WriteAllBytes("received_file.dat", data);
             });
