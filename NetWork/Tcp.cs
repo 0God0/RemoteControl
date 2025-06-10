@@ -1,820 +1,544 @@
+// ------------------------------------------------------------
+//  网络通信框架（精简版）
+//
+//  已为所有公开类型与成员补充中文 XML 文档注释，
+//  便于生成 API 帮助手册与后续维护。
+// ------------------------------------------------------------
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using STcpClient = System.Net.Sockets.TcpClient;
 
 namespace NetWork {
+    #region 委托与数据模型
+    /// <summary>
+    /// 处理字符串数据包的回调委托。
+    /// </summary>
+    /// <param name="client">来源客户端信息。</param>
+    /// <param name="packetMarker">数据包标记。</param>
+    /// <param name="payload">字符串负载。</param>
     public delegate void PacketHandler(ClientInfo client, string packetMarker, string payload);
+
+    /// <summary>
+    /// 处理二进制数据包的回调委托。
+    /// </summary>
+    /// <param name="client">来源客户端信息。</param>
+    /// <param name="packetMarker">数据包标记。</param>
+    /// <param name="data">二进制负载。</param>
     public delegate void BytesPacketHandler(ClientInfo client, string packetMarker, byte[] data);
+
+    /// <summary>
+    /// 客户端连接成功时触发。
+    /// </summary>
+    /// <param name="client">客户端信息。</param>
     public delegate void ConnectionHandler(ClientInfo client);
+
+    /// <summary>
+    /// 客户端断开连接时触发。
+    /// </summary>
+    /// <param name="client">客户端信息。</param>
     public delegate void DisconnectionHandler(ClientInfo client);
+
+    /// <summary>
+    /// 框架内部异常统一回调委托。
+    /// </summary>
+    /// <param name="ex">异常实例。</param>
     public delegate void ErrorHandler(Exception ex);
+
+    /// <summary>
+    /// 自定义加密处理委托。
+    /// </summary>
+    /// <param name="data">待加密数据。</param>
+    /// <returns>加密后的数据。</returns>
     public delegate byte[] EncryptionHandler(byte[] data);
+
+    /// <summary>
+    /// 自定义解密处理委托。
+    /// </summary>
+    /// <param name="data">待解密数据。</param>
+    /// <returns>解密后的数据。</returns>
     public delegate byte[] DecryptionHandler(byte[] data);
 
+    /// <summary>
+    /// 表示一个客户端的基本信息（线程安全只读）。
+    /// </summary>
     public class ClientInfo {
+        /// <summary>
+        /// 服务器为每个连接生成的唯一标识符。
+        /// </summary>
         public string Id { get; }
-        public IPEndPoint RemoteEndPoint { get; }
-        public object Tag { get; set; } // 用于存储自定义数据
 
+        /// <summary>
+        /// 远程终结点（IP + 端口）。
+        /// </summary>
+        public IPEndPoint RemoteEndPoint { get; }
+
+        /// <summary>
+        /// 可用于存放业务相关的自定义对象。
+        /// </summary>
+        public object Tag { get; set; }
+
+        /// <summary>
+        /// 初始化 <see cref="ClientInfo"/> 实例。
+        /// </summary>
+        /// <param name="id">唯一标识。</param>
+        /// <param name="remoteEndPoint">远程终结点。</param>
         public ClientInfo(string id, IPEndPoint remoteEndPoint) {
             Id = id;
             RemoteEndPoint = remoteEndPoint;
         }
     }
+    #endregion
 
-    public class TcpClient {
-        private TcpClientInternal client;
-        private ErrorHandler errorHandler;
+    #region 数据包封装/拆解辅助类
+    /// <summary>
+    /// 提供数据包封装与拆解的静态工具方法。
+    /// </summary>
+    internal static class PacketFraming {
+        /// <summary>
+        /// 固定包头长度（字节）。<br/>
+        /// 组成：类型(1) + 加密标记(1) + 标记长度(2) + 负载长度(4)
+        /// </summary>
+        private const int HeaderSize = 8;
 
-        public TcpClient(ErrorHandler errorHandler) {
-            this.errorHandler = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
-            this.client = new TcpClientInternal(errorHandler);
+        /// <summary>
+        /// 构建数据包。
+        /// </summary>
+        /// <param name="marker">业务标记。</param>
+        /// <param name="data">负载数据。</param>
+        /// <param name="binary">是否为二进制包。</param>
+        /// <param name="encrypted">是否加密。</param>
+        /// <param name="enc">加密委托（可为空）。</param>
+        /// <returns>完整数据包字节数组。</returns>
+        public static byte[] Build(string marker, byte[] data, bool binary, bool encrypted, EncryptionHandler enc) {
+            var markerBytes = Encoding.UTF8.GetBytes(marker);
+            var payload = encrypted && enc != null ? enc(data) : data;
+
+            // 按最大长度预分配，提高写入效率
+            using var ms = new MemoryStream(HeaderSize + markerBytes.Length + payload.Length);
+            ms.WriteByte(binary ? (byte)1 : (byte)0);                         // 类型
+            ms.WriteByte(encrypted ? (byte)1 : (byte)0);                      // 加密标记
+            ms.Write(BitConverter.GetBytes((ushort)markerBytes.Length), 0, 2);// 标记长度
+            ms.Write(markerBytes, 0, markerBytes.Length);                    // 标记
+            ms.Write(BitConverter.GetBytes(payload.Length), 0, 4);           // 负载长度
+            ms.Write(payload, 0, payload.Length);                             // 负载
+            return ms.ToArray();
         }
 
-        public void Connect(string ipAddress, int port) {
-            client.Connect(ipAddress, port);
-        }
+        /// <summary>
+        /// 尝试从接收缓存中解析出一个完整数据包。
+        /// </summary>
+        /// <param name="buf">接收缓存。</param>
+        /// <param name="binary">输出：是否二进制。</param>
+        /// <param name="encrypted">输出：是否加密。</param>
+        /// <param name="marker">输出：数据包标记。</param>
+        /// <param name="payload">输出：负载数据。</param>
+        /// <returns>若成功解析返回 <c>true</c>，否则 <c>false</c>。</returns>
+        public static bool TryParse(List<byte> buf, out bool binary, out bool encrypted, out string marker, out byte[] payload) {
+            marker = null; payload = null; binary = encrypted = false;
+            if (buf.Count < HeaderSize) return false;
 
-        public void Disconnect() {
-            client.Disconnect();
-        }
+            // 依次读取固定头字段
+            binary = buf[0] == 1;
+            encrypted = buf[1] == 1;
+            ushort markerLen = BitConverter.ToUInt16(buf.GetRange(2, 2).ToArray(), 0);
 
-        public void SendPacket(string packetMarker, string payload, bool encrypt = false) {
-            client.SendPacket(packetMarker, payload, encrypt);
-        }
+            int payloadLenOffset = 4 + markerLen;
+            if (buf.Count < payloadLenOffset + 4) return false;
 
-        public void SendBytes(string packetMarker, byte[] data, bool encrypt = false) {
-            client.SendBytes(packetMarker, data, encrypt);
-        }
+            int payloadLen = BitConverter.ToInt32(buf.GetRange(payloadLenOffset, 4).ToArray(), 0);
+            int total = HeaderSize + markerLen + payloadLen;
+            if (buf.Count < total) return false; // 数据尚未接收完整
 
-        public void RegisterHandler(string packetMarker, PacketHandler handler) {
-            client.RegisterHandler(packetMarker, handler);
-        }
+            // 解析标记与负载
+            marker = Encoding.UTF8.GetString(buf.GetRange(4, markerLen).ToArray());
+            payload = buf.GetRange(payloadLenOffset + 4, payloadLen).ToArray();
 
-        public void RegisterBytesHandler(string packetMarker, BytesPacketHandler handler) {
-            client.RegisterBytesHandler(packetMarker, handler);
-        }
-
-        public void UnregisterHandler(string packetMarker) {
-            client.UnregisterHandler(packetMarker);
-        }
-
-        public void UnregisterBytesHandler(string packetMarker) {
-            client.UnregisterBytesHandler(packetMarker);
-        }
-
-        public void SetEncryption(EncryptionHandler encryptor, DecryptionHandler decryptor) {
-            client.SetEncryption(encryptor, decryptor);
-        }
-
-        private class TcpClientInternal {
-            private System.Net.Sockets.TcpClient socket;
-            private NetworkStream stream;
-            private Thread receiveThread;
-            private bool isConnected;
-            private readonly ErrorHandler errorHandler;
-            private readonly Dictionary<string, PacketHandler> packetHandlers;
-            private readonly Dictionary<string, BytesPacketHandler> bytesHandlers;
-            private ClientInfo clientInfo;
-            private EncryptionHandler encryptor;
-            private DecryptionHandler decryptor;
-
-            public TcpClientInternal(ErrorHandler errorHandler) {
-                this.errorHandler = errorHandler;
-                packetHandlers = new Dictionary<string, PacketHandler>();
-                bytesHandlers = new Dictionary<string, BytesPacketHandler>();
-            }
-
-            public void Connect(string ipAddress, int port) {
-                try {
-                    socket = new System.Net.Sockets.TcpClient();
-                    socket.Connect(ipAddress, port);
-                    stream = socket.GetStream();
-                    isConnected = true;
-
-                    // 创建客户端信息
-                    clientInfo = new ClientInfo(
-                        Guid.NewGuid().ToString(),
-                        (IPEndPoint)socket.Client.RemoteEndPoint
-                    );
-
-                    receiveThread = new Thread(new ThreadStart(ReceiveData));
-                    receiveThread.IsBackground = true;
-                    receiveThread.Start();
-                } catch (Exception ex) {
-                    errorHandler(ex);
-                    Disconnect();
-                }
-            }
-
-            public void Disconnect() {
-                isConnected = false;
-                try {
-                    stream?.Close();
-                    socket?.Close();
-                    receiveThread?.Join(1000);
-                } catch { }
-            }
-
-            public void SendPacket(string packetMarker, string payload, bool encrypt) {
-                if (!isConnected) return;
-
-                try {
-                    // 将字符串转换为字节数组
-                    byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
-                    SendInternal(packetMarker, payloadBytes, encrypt, false);
-                } catch (Exception ex) {
-                    errorHandler(ex);
-                    Disconnect();
-                }
-            }
-
-            public void SendBytes(string packetMarker, byte[] data, bool encrypt) {
-                if (!isConnected) return;
-
-                try {
-                    SendInternal(packetMarker, data, encrypt, true);
-                } catch (Exception ex) {
-                    errorHandler(ex);
-                    Disconnect();
-                }
-            }
-
-            private void SendInternal(string packetMarker, byte[] payloadData, bool encrypt, bool isBinary) {
-                // 协议格式: [1字节类型][1字节加密标志][2字节标记长度][标记][4字节负载长度][负载]
-                // 类型: 0=字符串, 1=二进制
-
-                byte[] markerBytes = Encoding.UTF8.GetBytes(packetMarker);
-                byte[] payload = payloadData;
-
-                // 如果需要加密
-                if (encrypt && encryptor != null) {
-                    payload = encryptor(payloadData);
-                }
-
-                // 创建数据包
-                using (MemoryStream ms = new MemoryStream()) {
-                    // 类型 (1字节)
-                    ms.WriteByte(isBinary ? (byte)1 : (byte)0);
-
-                    // 加密标志 (1字节)
-                    ms.WriteByte(encrypt ? (byte)1 : (byte)0);
-
-                    // 标记长度 (2字节)
-                    byte[] markerLength = BitConverter.GetBytes((ushort)markerBytes.Length);
-                    ms.Write(markerLength, 0, 2);
-
-                    // 标记
-                    ms.Write(markerBytes, 0, markerBytes.Length);
-
-                    // 负载长度 (4字节)
-                    byte[] payloadLength = BitConverter.GetBytes(payload.Length);
-                    ms.Write(payloadLength, 0, 4);
-
-                    // 负载
-                    ms.Write(payload, 0, payload.Length);
-
-                    // 发送数据
-                    byte[] packetData = ms.ToArray();
-                    stream.Write(packetData, 0, packetData.Length);
-                }
-            }
-
-            public void RegisterHandler(string packetMarker, PacketHandler handler) {
-                lock (packetHandlers) {
-                    if (packetHandlers.ContainsKey(packetMarker)) {
-                        packetHandlers[packetMarker] += handler;
-                    } else {
-                        packetHandlers.Add(packetMarker, handler);
-                    }
-                }
-            }
-
-            public void RegisterBytesHandler(string packetMarker, BytesPacketHandler handler) {
-                lock (bytesHandlers) {
-                    if (bytesHandlers.ContainsKey(packetMarker)) {
-                        bytesHandlers[packetMarker] += handler;
-                    } else {
-                        bytesHandlers.Add(packetMarker, handler);
-                    }
-                }
-            }
-
-            public void UnregisterHandler(string packetMarker) {
-                lock (packetHandlers) {
-                    if (packetHandlers.ContainsKey(packetMarker)) {
-                        packetHandlers.Remove(packetMarker);
-                    }
-                }
-            }
-
-            public void UnregisterBytesHandler(string packetMarker) {
-                lock (bytesHandlers) {
-                    if (bytesHandlers.ContainsKey(packetMarker)) {
-                        bytesHandlers.Remove(packetMarker);
-                    }
-                }
-            }
-
-            public void SetEncryption(EncryptionHandler encryptor, DecryptionHandler decryptor) {
-                this.encryptor = encryptor;
-                this.decryptor = decryptor;
-            }
-
-            private void ReceiveData() {
-                byte[] buffer = new byte[8192]; // 8KB缓冲区
-                List<byte> receivedData = new List<byte>();
-                int bytesRead;
-
-                while (isConnected) {
-                    try {
-                        // 读取数据
-                        bytesRead = stream.Read(buffer, 0, buffer.Length);
-                        if (bytesRead == 0) {
-                            Disconnect();
-                            break;
-                        }
-
-                        // 添加到接收缓冲区
-                        receivedData.AddRange(new ArraySegment<byte>(buffer, 0, bytesRead));
-
-                        // 处理接收到的数据
-                        ProcessReceivedData(receivedData);
-                    } catch (Exception ex) {
-                        errorHandler(ex);
-                        Disconnect();
-                        break;
-                    }
-                }
-            }
-
-            private void ProcessReceivedData(List<byte> receivedData) {
-                // 需要至少8字节才能解析头部 (1+1+2+4=8字节)
-                while (receivedData.Count >= 4) {
-                    // 解析数据包类型
-                    byte packetType = receivedData[0];
-                    bool isBinary = packetType == 1;
-
-                    // 解析加密标志
-                    bool isEncrypted = receivedData[1] == 1;
-
-                    // 解析标记长度
-                    ushort markerLength = BitConverter.ToUInt16(receivedData.ToArray(), 2);
-
-                    // 计算负载长度字段的偏移量
-                    int payloadLengthOffset = 4 + markerLength;
-
-                    // 检查是否有足够的数据读取负载长度字段（4字节）
-                    if (receivedData.Count < payloadLengthOffset + 4) {
-                        return;
-                    }
-
-                    // 解析负载长度
-                    int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), payloadLengthOffset);
-
-                    // 计算整个数据包长度 (8 + markerLength + payloadLength)
-                    int totalLength = 8 + markerLength + payloadLength;
-
-                    // 如果数据不足，等待更多数据
-                    if (receivedData.Count < totalLength) {
-                        return;
-                    }
-
-                    // 提取标记
-                    byte[] markerBytes = new byte[markerLength];
-                    receivedData.CopyTo(4, markerBytes, 0, markerLength);
-                    string packetMarker = Encoding.UTF8.GetString(markerBytes);
-
-                    // 提取负载
-                    int payloadStart = payloadLengthOffset + 4;
-                    byte[] payload = new byte[payloadLength];
-                    receivedData.CopyTo(payloadStart, payload, 0, payloadLength);
-
-                    // 如果需要解密
-                    if (isEncrypted && decryptor != null) {
-                        try {
-                            payload = decryptor(payload);
-                        } catch (Exception ex) {
-                            errorHandler(new Exception("Decryption failed", ex));
-                            // 移除已处理的数据
-                            receivedData.RemoveRange(0, totalLength);
-                            continue;
-                        }
-                    }
-
-                    // 移除已处理的数据
-                    receivedData.RemoveRange(0, totalLength);
-
-                    // 根据类型分发处理
-                    if (isBinary) {
-                        BytesPacketHandler handler = null;
-                        lock (bytesHandlers) {
-                            bytesHandlers.TryGetValue(packetMarker, out handler);
-                        }
-
-                        if (handler != null) {
-                            // 使用线程池处理二进制数据
-                            Task.Run(() => {
-                                try {
-                                    handler.Invoke(clientInfo, packetMarker, payload);
-                                } catch (Exception ex) {
-                                    errorHandler(ex);
-                                }
-                            });
-                        }
-                    } else {
-                        PacketHandler handler = null;
-                        lock (packetHandlers) {
-                            packetHandlers.TryGetValue(packetMarker, out handler);
-                        }
-
-                        if (handler != null) {
-                            // 将字节数组转换为字符串
-                            string payloadStr = Encoding.UTF8.GetString(payload);
-
-                            // 使用线程池处理字符串数据
-                            Task.Run(() => {
-                                try {
-                                    handler.Invoke(clientInfo, packetMarker, payloadStr);
-                                } catch (Exception ex) {
-                                    errorHandler(ex);
-                                }
-                            });
-                        }
-                    }
-                }
-            }
+            // 从缓存中移除已消费部分
+            buf.RemoveRange(0, total);
+            return true;
         }
     }
+    #endregion
 
-    public class TcpServer {
-        private TcpServerInternal server;
-        private ErrorHandler errorHandler;
+    #region 连接封装类（客户端/服务器共用）
+    /// <summary>
+    /// 表示一个 TCP 连接，负责收发数据包、解析、加解密、回调分发等逻辑。
+    /// </summary>
+    internal sealed class Connection {
+        private readonly STcpClient socket;
+        private readonly NetworkStream stream;
+        private readonly Dictionary<string, PacketHandler> textHandlers;
+        private readonly Dictionary<string, BytesPacketHandler> binHandlers;
+        private readonly ErrorHandler onError;
+        private readonly EncryptionHandler encrypt;
+        private readonly DecryptionHandler decrypt;
 
-        public TcpServer(ErrorHandler errorHandler) {
-            this.errorHandler = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
-            this.server = new TcpServerInternal(errorHandler);
+        private readonly List<byte> recvBuf = new(8192); // 接收缓存
+        private readonly byte[] readBuf = new byte[8192];// 临时读缓冲
+        private volatile bool connected = true;
+        private readonly Thread rxThread;
+
+        /// <summary>
+        /// 当前连接对应的 <see cref="ClientInfo"/>。
+        /// </summary>
+        public ClientInfo Info { get; }
+
+        /// <summary>
+        /// 连接断开事件（内部使用）。
+        /// </summary>
+        public event Action<Connection> Disconnected;
+
+        /// <summary>
+        /// 创建 <see cref="Connection"/> 实例。
+        /// </summary>
+        /// <param name="sock">底层 <see cref="STcpClient"/>。</param>
+        /// <param name="txt">字符串包处理器集合。</param>
+        /// <param name="bin">二进制包处理器集合。</param>
+        /// <param name="err">错误回调。</param>
+        /// <param name="enc">加密委托。</param>
+        /// <param name="dec">解密委托。</param>
+        public Connection(STcpClient sock,
+                          Dictionary<string, PacketHandler> txt,
+                          Dictionary<string, BytesPacketHandler> bin,
+                          ErrorHandler err,
+                          EncryptionHandler enc,
+                          DecryptionHandler dec) {
+            socket = sock;
+            stream = socket.GetStream();
+            textHandlers = txt;
+            binHandlers = bin;
+            onError = err;
+            encrypt = enc;
+            decrypt = dec;
+
+            // 生成客户端信息
+            Info = new ClientInfo(Guid.NewGuid().ToString(),
+                                  (IPEndPoint)socket.Client.RemoteEndPoint);
+
+            // 启动接收线程
+            rxThread = new Thread(ReceiveLoop) { IsBackground = true };
+            rxThread.Start();
         }
 
-        public void Start(int port) {
-            server.Start(port);
+        #region 发送方法
+        /// <summary>
+        /// 发送字符串数据包。
+        /// </summary>
+        public void Send(string marker, string payload, bool enc = false)
+            => Send(marker, Encoding.UTF8.GetBytes(payload), enc, binary: false);
+
+        /// <summary>
+        /// 发送二进制数据包。
+        /// </summary>
+        public void Send(string marker, byte[] data, bool enc = false)
+            => Send(marker, data, enc, binary: true);
+
+        private void Send(string marker, byte[] data, bool enc, bool binary) {
+            if (!connected) return;
+            try {
+                var packet = PacketFraming.Build(marker, data, binary, enc, encrypt);
+                stream.Write(packet, 0, packet.Length);
+            } catch (Exception ex) {
+                HandleError(ex);
+                Disconnect();
+            }
         }
-
-        public void Stop() {
-            server.Stop();
-        }
-
-        public void BroadcastPacket(string packetMarker, string payload, bool encrypt = false) {
-            server.BroadcastPacket(packetMarker, payload, encrypt);
-        }
-
-        public void BroadcastBytes(string packetMarker, byte[] data, bool encrypt = false) {
-            server.BroadcastBytes(packetMarker, data, encrypt);
-        }
-
-        public void SendToClient(string clientId, string packetMarker, string payload, bool encrypt = false) {
-            server.SendToClient(clientId, packetMarker, payload, encrypt);
-        }
-
-        public void SendBytesToClient(string clientId, string packetMarker, byte[] data, bool encrypt = false) {
-            server.SendBytesToClient(clientId, packetMarker, data, encrypt);
-        }
-
-        public void RegisterHandler(string packetMarker, PacketHandler handler) {
-            server.RegisterHandler(packetMarker, handler);
-        }
-
-        public void RegisterBytesHandler(string packetMarker, BytesPacketHandler handler) {
-            server.RegisterBytesHandler(packetMarker, handler);
-        }
-
-        public void UnregisterHandler(string packetMarker) {
-            server.UnregisterHandler(packetMarker);
-        }
-
-        public void UnregisterBytesHandler(string packetMarker) {
-            server.UnregisterBytesHandler(packetMarker);
-        }
-
-        public void RegisterConnectionHandler(ConnectionHandler handler) {
-            server.RegisterConnectionHandler(handler);
-        }
-
-        public void RegisterDisconnectionHandler(DisconnectionHandler handler) {
-            server.RegisterDisconnectionHandler(handler);
-        }
-
-        public void SetEncryption(EncryptionHandler encryptor, DecryptionHandler decryptor) {
-            server.SetEncryption(encryptor, decryptor);
-        }
-
-        private class TcpServerInternal {
-            private TcpListener listener;
-            private Thread acceptThread;
-            private bool isRunning;
-            private readonly ErrorHandler errorHandler;
-            private readonly Dictionary<string, PacketHandler> packetHandlers;
-            private readonly Dictionary<string, BytesPacketHandler> bytesHandlers;
-            private readonly ConcurrentDictionary<string, ClientHandler> clients;
-            private ConnectionHandler connectionHandler;
-            private DisconnectionHandler disconnectionHandler;
-            private EncryptionHandler encryptor;
-            private DecryptionHandler decryptor;
-
-            public TcpServerInternal(ErrorHandler errorHandler) {
-                this.errorHandler = errorHandler;
-                packetHandlers = new Dictionary<string, PacketHandler>();
-                bytesHandlers = new Dictionary<string, BytesPacketHandler>();
-                clients = new ConcurrentDictionary<string, ClientHandler>();
-            }
-
-            public void Start(int port) {
-                try {
-                    listener = new TcpListener(IPAddress.Any, port);
-                    listener.Start();
-                    isRunning = true;
-
-                    acceptThread = new Thread(new ThreadStart(AcceptClients));
-                    acceptThread.IsBackground = true;
-                    acceptThread.Start();
-                } catch (Exception ex) {
-                    errorHandler(ex);
-                    Stop();
-                }
-            }
-
-            public void Stop() {
-                isRunning = false;
-                listener?.Stop();
-
-                foreach (var client in clients.Values) {
-                    client.Disconnect();
-                }
-                clients.Clear();
-
-                acceptThread?.Join();
-            }
-
-            public void BroadcastPacket(string packetMarker, string payload, bool encrypt) {
-                foreach (var client in clients.Values) {
-                    client.SendPacket(packetMarker, payload, encrypt);
-                }
-            }
-
-            public void BroadcastBytes(string packetMarker, byte[] data, bool encrypt) {
-                foreach (var client in clients.Values) {
-                    client.SendBytes(packetMarker, data, encrypt);
-                }
-            }
-
-            public void SendToClient(string clientId, string packetMarker, string payload, bool encrypt) {
-                if (clients.TryGetValue(clientId, out ClientHandler client)) {
-                    client.SendPacket(packetMarker, payload, encrypt);
-                }
-            }
-
-            public void SendBytesToClient(string clientId, string packetMarker, byte[] data, bool encrypt) {
-                if (clients.TryGetValue(clientId, out ClientHandler client)) {
-                    client.SendBytes(packetMarker, data, encrypt);
-                }
-            }
-
-            public void RegisterHandler(string packetMarker, PacketHandler handler) {
-                lock (packetHandlers) {
-                    if (packetHandlers.ContainsKey(packetMarker)) {
-                        packetHandlers[packetMarker] += handler;
-                    } else {
-                        packetHandlers.Add(packetMarker, handler);
-                    }
-                }
-            }
-
-            public void RegisterBytesHandler(string packetMarker, BytesPacketHandler handler) {
-                lock (bytesHandlers) {
-                    if (bytesHandlers.ContainsKey(packetMarker)) {
-                        bytesHandlers[packetMarker] += handler;
-                    } else {
-                        bytesHandlers.Add(packetMarker, handler);
-                    }
-                }
-            }
-
-            public void UnregisterHandler(string packetMarker) {
-                lock (packetHandlers) {
-                    if (packetHandlers.ContainsKey(packetMarker)) {
-                        packetHandlers.Remove(packetMarker);
-                    }
-                }
-            }
-
-            public void UnregisterBytesHandler(string packetMarker) {
-                lock (bytesHandlers) {
-                    if (bytesHandlers.ContainsKey(packetMarker)) {
-                        bytesHandlers.Remove(packetMarker);
-                    }
-                }
-            }
-
-            public void RegisterConnectionHandler(ConnectionHandler handler) {
-                connectionHandler += handler;
-            }
-
-            public void RegisterDisconnectionHandler(DisconnectionHandler handler) {
-                disconnectionHandler += handler;
-            }
-
-            public void SetEncryption(EncryptionHandler encryptor, DecryptionHandler decryptor) {
-                this.encryptor = encryptor;
-                this.decryptor = decryptor;
-            }
-
-            private void AcceptClients() {
-                while (isRunning) {
-                    try {
-                        System.Net.Sockets.TcpClient clientSocket = listener.AcceptTcpClient();
-                        var clientHandler = new ClientHandler(
-                            clientSocket,
-                            packetHandlers,
-                            bytesHandlers,
-                            errorHandler,
-                            OnClientDisconnected,
-                            encryptor,
-                            decryptor
-                        );
-
-                        // 添加客户端到列表
-                        clients.TryAdd(clientHandler.ClientInfo.Id, clientHandler);
-
-                        // 触发连接事件
-                        connectionHandler?.Invoke(clientHandler.ClientInfo);
-                    } catch (Exception ex) {
-                        if (isRunning) {
-                            errorHandler(ex);
-                        }
-                    }
-                }
-            }
-
-            private void OnClientDisconnected(ClientHandler client) {
-                // 从客户端列表移除
-                clients.TryRemove(client.ClientInfo.Id, out _);
-
-                // 触发断开连接事件
-                disconnectionHandler?.Invoke(client.ClientInfo);
-            }
-
-            private class ClientHandler {
-                private readonly System.Net.Sockets.TcpClient socket;
-                private readonly NetworkStream stream;
-                private readonly Thread receiveThread;
-                private bool isConnected;
-                private readonly Dictionary<string, PacketHandler> packetHandlers;
-                private readonly Dictionary<string, BytesPacketHandler> bytesHandlers;
-                private readonly ErrorHandler errorHandler;
-                private readonly Action<ClientHandler> disconnectCallback;
-                private readonly EncryptionHandler encryptor;
-                private readonly DecryptionHandler decryptor;
-
-                public ClientInfo ClientInfo { get; }
-
-                public ClientHandler(
-                    System.Net.Sockets.TcpClient socket,
-                    Dictionary<string, PacketHandler> packetHandlers,
-                    Dictionary<string, BytesPacketHandler> bytesHandlers,
-                    ErrorHandler errorHandler,
-                    Action<ClientHandler> disconnectCallback,
-                    EncryptionHandler encryptor,
-                    DecryptionHandler decryptor) {
-                    this.socket = socket;
-                    this.stream = socket.GetStream();
-                    this.packetHandlers = packetHandlers;
-                    this.bytesHandlers = bytesHandlers;
-                    this.errorHandler = errorHandler;
-                    this.disconnectCallback = disconnectCallback;
-                    this.encryptor = encryptor;
-                    this.decryptor = decryptor;
-                    isConnected = true;
-
-                    // 创建客户端信息
-                    ClientInfo = new ClientInfo(
-                        Guid.NewGuid().ToString(),
-                        (IPEndPoint)socket.Client.RemoteEndPoint
-                    );
-
-                    receiveThread = new Thread(new ThreadStart(ReceiveData));
-                    receiveThread.IsBackground = true;
-                    receiveThread.Start();
-                }
-
-                public void Disconnect() {
-                    if (!isConnected) return;
-
-                    isConnected = false;
-                    try {
-                        stream?.Close();
-                        socket?.Close();
-                        receiveThread?.Join(1000);
-                    } catch { }
-
-                    disconnectCallback?.Invoke(this);
-                }
-
-                public void SendPacket(string packetMarker, string payload, bool encrypt) {
-                    if (!isConnected) return;
-
-                    try {
-                        // 将字符串转换为字节数组
-                        byte[] payloadBytes = Encoding.UTF8.GetBytes(payload);
-                        SendInternal(packetMarker, payloadBytes, encrypt, false);
-                    } catch (Exception ex) {
-                        errorHandler(ex);
-                        Disconnect();
-                    }
-                }
-
-                public void SendBytes(string packetMarker, byte[] data, bool encrypt) {
-                    if (!isConnected) return;
-
-                    try {
-                        SendInternal(packetMarker, data, encrypt, true);
-                    } catch (Exception ex) {
-                        errorHandler(ex);
-                        Disconnect();
-                    }
-                }
-
-                private void SendInternal(string packetMarker, byte[] payloadData, bool encrypt, bool isBinary) {
-                    // 协议格式: [1字节类型][1字节加密标志][2字节标记长度][标记][4字节负载长度][负载]
-                    // 类型: 0=字符串, 1=二进制
-
-                    byte[] markerBytes = Encoding.UTF8.GetBytes(packetMarker);
-                    byte[] payload = payloadData;
-
-                    // 如果需要加密
-                    if (encrypt && encryptor != null) {
-                        payload = encryptor(payloadData);
-                    }
-
-                    // 创建数据包
-                    using (MemoryStream ms = new MemoryStream()) {
-                        // 类型 (1字节)
-                        ms.WriteByte(isBinary ? (byte)1 : (byte)0);
-
-                        // 加密标志 (1字节)
-                        ms.WriteByte(encrypt ? (byte)1 : (byte)0);
-
-                        // 标记长度 (2字节)
-                        byte[] markerLength = BitConverter.GetBytes((ushort)markerBytes.Length);
-                        ms.Write(markerLength, 0, 2);
-
-                        // 标记
-                        ms.Write(markerBytes, 0, markerBytes.Length);
-
-                        // 负载长度 (4字节)
-                        byte[] payloadLength = BitConverter.GetBytes(payload.Length);
-                        ms.Write(payloadLength, 0, 4);
-
-                        // 负载
-                        ms.Write(payload, 0, payload.Length);
-
-                        // 发送数据
-                        byte[] packetData = ms.ToArray();
-                        stream.Write(packetData, 0, packetData.Length);
-                    }
-                }
-
-                private void ReceiveData() {
-                    byte[] buffer = new byte[8192]; // 8KB缓冲区
-                    List<byte> receivedData = new List<byte>();
-                    int bytesRead = 0;
-
-                    while (isConnected) {
-                        try {
-                            Debug.WriteLine($"1 {bytesRead}");
-                            // 读取数据
-                            bytesRead = stream.Read(buffer, 0, buffer.Length);
-                            if (bytesRead == 0) {
-                                Disconnect();
-                                break;
-                            }
-                            Debug.WriteLine($"2 {bytesRead}");
-
-                            // 添加到接收缓冲区
-                            receivedData.AddRange(new ArraySegment<byte>(buffer, 0, bytesRead));
-
-                            // 处理接收到的数据
-                            ProcessReceivedData(receivedData);
-                        } catch (Exception ex) {
-                            errorHandler(ex);
-                            Disconnect();
-                            break;
-                        }
-                    }
-                }
-
-                private void ProcessReceivedData(List<byte> receivedData) {
-                    // 需要至少8字节才能解析头部 (1+1+2+4=8字节)
-                    while (receivedData.Count >= 4) {
-                        // 解析数据包类型
-                        byte packetType = receivedData[0];
-                        bool isBinary = packetType == 1;
-
-                        // 解析加密标志
-                        bool isEncrypted = receivedData[1] == 1;
-
-                        // 解析标记长度
-                        ushort markerLength = BitConverter.ToUInt16(receivedData.ToArray(), 2);
-
-                        // 计算负载长度字段的偏移量
-                        int payloadLengthOffset = 4 + markerLength;
-
-                        // 检查是否有足够的数据读取负载长度字段（4字节）
-                        if (receivedData.Count < payloadLengthOffset + 4) {
-                            return;
-                        }
-
-                        // 解析负载长度
-                        int payloadLength = BitConverter.ToInt32(receivedData.ToArray(), payloadLengthOffset);
-
-                        // 计算整个数据包长度 (8 + markerLength + payloadLength)
-                        int totalLength = 8 + markerLength + payloadLength;
-
-                        // 如果数据不足，等待更多数据
-                        if (receivedData.Count < totalLength) {
-                            return;
-                        }
-
-                        // 提取标记
-                        byte[] markerBytes = new byte[markerLength];
-                        receivedData.CopyTo(4, markerBytes, 0, markerLength);
-                        string packetMarker = Encoding.UTF8.GetString(markerBytes);
-
-                        // 提取负载
-                        int payloadStart = payloadLengthOffset + 4;
-                        byte[] payload = new byte[payloadLength];
-                        receivedData.CopyTo(payloadStart, payload, 0, payloadLength);
-
-                        // 如果需要解密
-                        if (isEncrypted && decryptor != null) {
+        #endregion
+
+        #region 接收循环
+        private void ReceiveLoop() {
+            try {
+                while (connected) {
+                    int read = stream.Read(readBuf, 0, readBuf.Length);
+                    if (read == 0) break; // 远端关闭连接
+
+                    // 将新读取的数据追加到缓存
+                    recvBuf.AddRange(new ArraySegment<byte>(readBuf, 0, read));
+
+                    // 尝试解析所有完整数据包
+                    while (PacketFraming.TryParse(recvBuf,
+                                                  out bool bin,
+                                                  out bool enc,
+                                                  out string marker,
+                                                  out byte[] payload)) {
+                        // 如需解密
+                        if (enc && decrypt != null) {
                             try {
-                                payload = decryptor(payload);
+                                payload = decrypt(payload);
                             } catch (Exception ex) {
-                                errorHandler(new Exception("Decryption failed", ex));
-                                // 移除已处理的数据
-                                receivedData.RemoveRange(0, totalLength);
-                                continue;
+                                HandleError(new Exception("Decryption failed", ex));
+                                continue; // 跳过本包
                             }
                         }
 
-                        // 移除已处理的数据
-                        receivedData.RemoveRange(0, totalLength);
-
-                        // 根据类型分发处理
-                        if (isBinary) {
-                            BytesPacketHandler handler = null;
-                            lock (bytesHandlers) {
-                                bytesHandlers.TryGetValue(packetMarker, out handler);
-                            }
-
-                            if (handler != null) {
-                                // 使用线程池处理二进制数据
-                                Task.Run(() => {
-                                    try {
-                                        handler.Invoke(ClientInfo, packetMarker, payload);
-                                    } catch (Exception ex) {
-                                        errorHandler(ex);
-                                    }
-                                });
-                            }
-                        } else {
-                            PacketHandler handler = null;
-                            lock (packetHandlers) {
-                                packetHandlers.TryGetValue(packetMarker, out handler);
-                            }
-
-                            if (handler != null) {
-                                // 将字节数组转换为字符串
-                                string payloadStr = Encoding.UTF8.GetString(payload);
-
-                                // 使用线程池处理字符串数据
-                                Task.Run(() => {
-                                    try {
-                                        handler.Invoke(ClientInfo, packetMarker, payloadStr);
-                                    } catch (Exception ex) {
-                                        errorHandler(ex);
-                                    }
-                                });
-                            }
-                        }
+                        // 分发到对应处理器（多线程）
+                        if (bin)
+                            Dispatch(binHandlers, marker,
+                                     h => h?.Invoke(Info, marker, payload));
+                        else
+                            Dispatch(textHandlers, marker,
+                                     h => h?.Invoke(Info, marker,
+                                                    Encoding.UTF8.GetString(payload)));
                     }
+                }
+            } catch (Exception ex) {
+                HandleError(ex);
+            } finally {
+                Disconnect();
+            }
+        }
+        #endregion
+
+        #region 私有辅助
+        private static void Dispatch<T>(Dictionary<string, T> dict,
+                                        string key,
+                                        Action<T> inv) where T : Delegate {
+            if (!dict.TryGetValue(key, out var h) || h == null) return;
+            _ = Task.Run(() => {
+                try { inv(h); } catch { /* 用户代码异常忽略 */ }
+            });
+        }
+
+        private void HandleError(Exception ex) => onError?.Invoke(ex);
+        #endregion
+
+        /// <summary>
+        /// 主动或被动断开连接。
+        /// </summary>
+        public void Disconnect() {
+            if (!connected) return;
+
+            connected = false;
+            try {
+                stream.Close();
+                socket.Close();
+            } catch { /* 忽略关闭异常 */ }
+
+            // 通知上层
+            Disconnected?.Invoke(this);
+        }
+    }
+    #endregion
+
+    #region TcpClient API
+    /// <summary>
+    /// 轻量级 TCP 客户端封装（同步收包线程 + 线程池分发）。
+    /// </summary>
+    public class TcpClient {
+        private readonly ErrorHandler onError;
+        private readonly Dictionary<string, PacketHandler> textHandlers = new();
+        private readonly Dictionary<string, BytesPacketHandler> binHandlers = new();
+        private Connection conn;
+        private EncryptionHandler encrypt;
+        private DecryptionHandler decrypt;
+
+        /// <summary>
+        /// 创建 <see cref="TcpClient"/>。
+        /// </summary>
+        /// <param name="errorHandler">统一错误回调。</param>
+        public TcpClient(ErrorHandler errorHandler)
+            => onError = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
+
+        /// <summary>
+        /// 连接到服务器。
+        /// </summary>
+        public void Connect(string host, int port) {
+            var sock = new STcpClient();
+            sock.Connect(host, port);
+            conn = new Connection(sock, textHandlers, binHandlers, onError, encrypt, decrypt);
+        }
+
+        /// <summary>
+        /// 断开连接。
+        /// </summary>
+        public void Disconnect() => conn?.Disconnect();
+
+        /// <summary>
+        /// 发送字符串数据包。
+        /// </summary>
+        public void SendPacket(string marker, string payload, bool enc = false)
+            => conn?.Send(marker, payload, enc);
+
+        /// <summary>
+        /// 发送二进制数据包。
+        /// </summary>
+        public void SendBytes(string marker, byte[] data, bool enc = false)
+            => conn?.Send(marker, data, enc);
+
+        /// <summary>
+        /// 注册字符串包处理器（可叠加）。
+        /// </summary>
+        public void RegisterHandler(string marker, PacketHandler h) => Add(textHandlers, marker, h);
+
+        /// <summary>
+        /// 注册二进制包处理器（可叠加）。
+        /// </summary>
+        public void RegisterBytesHandler(string marker, BytesPacketHandler h) => Add(binHandlers, marker, h);
+
+        /// <summary>
+        /// 取消指定标记的字符串包处理器。
+        /// </summary>
+        public void UnregisterHandler(string marker) => textHandlers.Remove(marker);
+
+        /// <summary>
+        /// 取消指定标记的二进制包处理器。
+        /// </summary>
+        public void UnregisterBytesHandler(string marker) => binHandlers.Remove(marker);
+
+        /// <summary>
+        /// 配置加解密回调。
+        /// </summary>
+        public void SetEncryption(EncryptionHandler enc, DecryptionHandler dec) { encrypt = enc; decrypt = dec; }
+
+        private static void Add<T>(IDictionary<string, T> dict, string key, T h) where T : Delegate
+            => dict[key] = dict.TryGetValue(key, out var exist) ? (T)Delegate.Combine(exist, h) : h;
+    }
+    #endregion
+
+    #region TcpServer API
+    /// <summary>
+    /// 轻量级 TCP 服务器封装（每连接 1 线程，同步读，线程池分发）。
+    /// </summary>
+    public class TcpServer {
+        private readonly ErrorHandler onError;
+        private readonly Dictionary<string, PacketHandler> textHandlers = new();
+        private readonly Dictionary<string, BytesPacketHandler> binHandlers = new();
+        private readonly ConcurrentDictionary<string, Connection> clients = new();
+        private TcpListener listener;
+        private Thread acceptThread;
+        private EncryptionHandler encrypt;
+        private DecryptionHandler decrypt;
+        private volatile bool running;
+        private ConnectionHandler onConnect;
+        private DisconnectionHandler onDisconnect;
+
+        /// <summary>
+        /// 初始化 <see cref="TcpServer"/>。
+        /// </summary>
+        /// <param name="errorHandler">统一错误回调。</param>
+        public TcpServer(ErrorHandler errorHandler)
+            => onError = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
+
+        /// <summary>
+        /// 启动服务器并监听指定端口。
+        /// </summary>
+        public void Start(int port) {
+            if (running) return;
+            listener = new TcpListener(IPAddress.Any, port);
+            listener.Start();
+            running = true;
+
+            acceptThread = new Thread(AcceptLoop) { IsBackground = true };
+            acceptThread.Start();
+        }
+
+        /// <summary>
+        /// 停止服务器并断开所有客户端。
+        /// </summary>
+        public void Stop() {
+            running = false;
+            try { listener?.Stop(); } catch { }
+
+            foreach (var c in clients.Values) c.Disconnect();
+            clients.Clear();
+            acceptThread?.Join();
+        }
+
+        // 接受循环：阻塞 Accept，创建 Connection
+        private void AcceptLoop() {
+            while (running) {
+                try {
+                    var sock = listener.AcceptTcpClient();
+                    var conn = new Connection(sock, textHandlers, binHandlers, onError, encrypt, decrypt);
+                    conn.Disconnected += OnClientDisconnected;
+
+                    clients.TryAdd(conn.Info.Id, conn);
+                    onConnect?.Invoke(conn.Info);
+                } catch (SocketException) {
+                    if (!running) break; // Stop() 已调用
+                } catch (Exception ex) {
+                    if (running) onError?.Invoke(ex);
                 }
             }
         }
+
+        // 客户端断开回调
+        private void OnClientDisconnected(Connection c) {
+            clients.TryRemove(c.Info.Id, out _);
+            onDisconnect?.Invoke(c.Info);
+        }
+
+        /// <summary>
+        /// 向所有客户端广播字符串数据包。
+        /// </summary>
+        public void BroadcastPacket(string marker, string payload, bool enc = false)
+            => Parallel.ForEach(clients.Values, c => c.Send(marker, payload, enc));
+
+        /// <summary>
+        /// 向所有客户端广播二进制数据包。
+        /// </summary>
+        public void BroadcastBytes(string marker, byte[] data, bool enc = false)
+            => Parallel.ForEach(clients.Values, c => c.Send(marker, data, enc));
+
+        /// <summary>
+        /// 向指定客户端发送字符串数据包。
+        /// </summary>
+        public void SendToClient(string id, string marker, string payload, bool enc = false) {
+            if (clients.TryGetValue(id, out var c)) c.Send(marker, payload, enc);
+        }
+
+        /// <summary>
+        /// 向指定客户端发送二进制数据包。
+        /// </summary>
+        public void SendBytesToClient(string id, string marker, byte[] data, bool enc = false) {
+            if (clients.TryGetValue(id, out var c)) c.Send(marker, data, enc);
+        }
+
+        /// <summary>
+        /// 注册字符串包处理器（可叠加）。
+        /// </summary>
+        public void RegisterHandler(string marker, PacketHandler h) => Add(textHandlers, marker, h);
+
+        /// <summary>
+        /// 注册二进制包处理器（可叠加）。
+        /// </summary>
+        public void RegisterBytesHandler(string marker, BytesPacketHandler h) => Add(binHandlers, marker, h);
+
+        /// <summary>
+        /// 取消指定标记的字符串包处理器。
+        /// </summary>
+        public void UnregisterHandler(string marker) => textHandlers.Remove(marker);
+
+        /// <summary>
+        /// 取消指定标记的二进制包处理器。
+        /// </summary>
+        public void UnregisterBytesHandler(string marker) => binHandlers.Remove(marker);
+
+        /// <summary>
+        /// 注册客户端连接事件处理器（可叠加）。
+        /// </summary>
+        public void RegisterConnectionHandler(ConnectionHandler h) => onConnect += h;
+
+        /// <summary>
+        /// 注册客户端断开事件处理器（可叠加）。
+        /// </summary>
+        public void RegisterDisconnectionHandler(DisconnectionHandler h) => onDisconnect += h;
+
+        /// <summary>
+        /// 配置加解密回调。
+        /// </summary>
+        public void SetEncryption(EncryptionHandler enc, DecryptionHandler dec) { encrypt = enc; decrypt = dec; }
+
+        private static void Add<T>(IDictionary<string, T> dict, string key, T h) where T : Delegate
+            => dict[key] = dict.TryGetValue(key, out var exist) ? (T)Delegate.Combine(exist, h) : h;
     }
+    #endregion
 }

@@ -22,10 +22,10 @@ class TcpClientExample {
         client.Connect("127.0.0.1", 11451);
 
         // 发送文本消息（加密）
-        //while (true) {
-            client.SendPacket("MSG", "Hello, server!", false);
+        while (true) {
+            client.SendPacket("MSG", "Hello, server!", true);
             Thread.Sleep(1000); // 每秒发送一次
-        //}
+        }
         
 
         // 发送文件（不加密）
