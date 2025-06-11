@@ -16,6 +16,10 @@ namespace ControlServer
         private void Form1_Load(object sender, EventArgs e) {
             CheckForIllegalCrossThreadCalls = false;
             server = new NetWork.TcpServer(ex => infoBox.Text += ($"Server error: {ex.Message}"));
+            server.RegisterDisconnectionHandler(client => {
+                infoBox.Text += ($"Client disconnected: {client.RemoteEndPoint}" + Environment.NewLine);
+                Debug.WriteLine($"Client disconnected: {client.RemoteEndPoint}" + Environment.NewLine);
+            });
 
             // 设置AES加密
             var key = Encoding.UTF8.GetBytes("1234567891234567");
@@ -34,7 +38,7 @@ namespace ControlServer
             {
                 infoBox.Text+=($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
                 Debug.WriteLine($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
-                server.SendToClient(client.Id, "REPLY", $"Echo: {payload}", true);
+                server.SendToClient(client.Id, "REPLY", $"Echo: {payload}", false);
             });
 
             // 注册文件传输处理器

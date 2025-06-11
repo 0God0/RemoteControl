@@ -2,7 +2,10 @@
 
 class TcpClientExample {
     static void Main() {
-        var client = new NetWork.TcpClient(ex => Console.WriteLine($"Client error: {ex.Message}"));
+        var client = new NetWork.TcpClient(ex => {
+            Console.WriteLine($"Client error: {ex.Message}");
+
+        });
 
         // 设置AES加密
         var key = Encoding.UTF8.GetBytes("1234567891234567");
@@ -18,11 +21,12 @@ class TcpClientExample {
         // 注册文件传输处理器
         client.RegisterBytesHandler("FILE", (_, marker, data) =>
             Console.WriteLine($"Received file: {data.Length} bytes"));
+        while (!client.Connect("127.0.0.1", 11451)) ;
 
-        client.Connect("127.0.0.1", 11451);
-
+        int i = 10;
         // 发送文本消息（加密）
         while (true) {
+            if (i-- < 0) break; // 限制发送次数
             client.SendPacket("MSG", "Hello, server!", true);
             Thread.Sleep(1000); // 每秒发送一次
         }
