@@ -3,8 +3,7 @@ using NetWork;
 using System.Diagnostics;
 using System.Text;
 
-namespace ControlServer
-{
+namespace ControlServer {
     public partial class Form1 : Form {
 
         TcpServer server;
@@ -16,7 +15,7 @@ namespace ControlServer
         private void Form1_Load(object sender, EventArgs e) {
             CheckForIllegalCrossThreadCalls = false;
             server = new NetWork.TcpServer(ex => infoBox.Text += ($"Server error: {ex.Message}"));
-            server.RegisterDisconnectionHandler(client => {
+            server.onDisconnect += (client => {
                 infoBox.Text += ($"Client disconnected: {client.RemoteEndPoint}" + Environment.NewLine);
                 Debug.WriteLine($"Client disconnected: {client.RemoteEndPoint}" + Environment.NewLine);
             });
@@ -28,26 +27,20 @@ namespace ControlServer
                 data => CAes.AesDecrypt(data, key)
             );
 
-            server.RegisterConnectionHandler(client => {
+            server.onConnect += (client => {
                 infoBox.Text += ($"Client connected: {client.RemoteEndPoint}" + Environment.NewLine);
                 Debug.WriteLine($"Client connected: {client.RemoteEndPoint}" + Environment.NewLine);
             });
-                
 
-            server.RegisterHandler("MSG", (client, marker, payload) =>
-            {
-                infoBox.Text+=($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
+
+            server.RegisterHandler("MSG", (client, marker, payload) => {
+                //infoBox.Text+=($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
                 Debug.WriteLine($"Received from {client.RemoteEndPoint}: {payload}" + Environment.NewLine);
                 server.SendToClient(client.Id, "REPLY", $"Echo: {payload}", false);
             });
 
-            // 注册文件传输处理器
-            server.RegisterBytesHandler("FILE", (client, marker, data) =>
-            {
-                Console.WriteLine($"Received file ({data.Length} bytes) from {client.RemoteEndPoint}"+Environment.NewLine);
-                // 保存文件
-                File.WriteAllBytes("received_file.dat", data);
-            });
+            server.EnableFileReceiver(@"D:\Incoming");     // 保存到 D:\Incoming
+            server.FileReceived += (c, p) => Console.WriteLine("已存: " + p);
 
             server.Start(11451);
 

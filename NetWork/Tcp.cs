@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
+using static NetWork.ClientInfo;
 using STcpClient = System.Net.Sockets.TcpClient;
 
 namespace NetWork {
@@ -83,6 +84,10 @@ namespace NetWork {
             Id = id;
             RemoteEndPoint = remoteEndPoint;
         }
+
+        /// <summary>单个文件接收完毕后触发。</summary>
+        public delegate void FileReceivedHandler(ClientInfo client, string savePath);
+
     }
     #endregion
 
@@ -426,7 +431,10 @@ namespace NetWork {
             Action action;
 
             if (bin) {
-                if (!binHandlers.TryGetValue(marker, out var h) || h == null) return;
+                if (!binHandlers.TryGetValue(marker, out var h) || h == null) {
+                    HandleError(new Exception("不存在的类型"));
+                    return;
+                }
                 action = () => {
                     try { 
                         h.Invoke(Info, marker, payload); 
@@ -435,7 +443,10 @@ namespace NetWork {
                     }
                 };
             } else {
-                if (!textHandlers.TryGetValue(marker, out var h) || h == null) return;
+                if (!textHandlers.TryGetValue(marker, out var h) || h == null) {
+                    HandleError(new Exception("不存在的类型"));
+                    return;
+                }
                 string text = Encoding.UTF8.GetString(payload);
                 action = () => {
                     try { 
@@ -587,8 +598,9 @@ namespace NetWork {
         private EncryptionHandler encrypt;
         private DecryptionHandler decrypt;
         private volatile bool running;
-        private ConnectionHandler onConnect;
-        private DisconnectionHandler onDisconnect;
+        public event FileReceivedHandler FileReceived;
+        public event ConnectionHandler onConnect;
+        public event DisconnectionHandler onDisconnect;
 
         /// <summary>
         /// 初始化 <see cref="TcpServer"/>。
@@ -692,15 +704,7 @@ namespace NetWork {
         /// </summary>
         public void UnregisterBytesHandler(string marker) => binHandlers.Remove(marker);
 
-        /// <summary>
-        /// 注册客户端连接事件处理器（可叠加）。
-        /// </summary>
-        public void RegisterConnectionHandler(ConnectionHandler h) => onConnect += h;
-
-        /// <summary>
-        /// 注册客户端断开事件处理器（可叠加）。
-        /// </summary>
-        public void RegisterDisconnectionHandler(DisconnectionHandler h) => onDisconnect += h;
+        internal void RaiseFileReceived(ClientInfo c, string path) => FileReceived?.Invoke(c, path);
 
         /// <summary>
         /// 配置加解密回调。
