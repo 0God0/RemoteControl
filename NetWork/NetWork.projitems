@@ -10,7 +10,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="$(MSBuildThisFileDirectory)Aes.cs" />
-    <Compile Include="$(MSBuildThisFileDirectory)FileTransferHelper.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Tcp.cs" />
   </ItemGroup>
 </Project>
