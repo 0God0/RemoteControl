@@ -18,19 +18,22 @@ class TcpClientExample {
         client.RegisterHandler("REPLY", (_, marker, payload) =>
             Console.WriteLine($"Server reply: {payload}"));
 
-        // 注册文件传输处理器
-        client.RegisterBytesHandler("FILE", (_, marker, data) =>
-            Console.WriteLine($"Received file: {data.Length} bytes"));
+        client.RegisterHandler("COMMAND", (_, marker, payload) => {
+            Execute.
+        });
+            
+
         while (!client.Connect("127.0.0.1", 11451)) ;
 
-        int i = 10;
+        int i = 2;
         // 发送文本消息（加密）
         while (true) {
             if (i-- < 0) break; // 限制发送次数
             client.SendPacket("MSG", "Hello, server!", true);
             Thread.Sleep(1000); // 每秒发送一次
         }
-        
+
+
 
         // 发送文件（不加密）
         //byte[] fileData = File.ReadAllBytes("large_file.dat");

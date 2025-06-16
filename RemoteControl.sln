@@ -7,12 +7,12 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ControlServer", "ControlSer
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ControlClient", "ControlClient\ControlClient.csproj", "{74FD4046-B9A5-4649-BBC9-EE28F7C11717}"
 EndProject
-Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "NetWork", "NetWork\NetWork.shproj", "{0ECB9110-95A7-4A26-A43B-D716A3B3FFEC}"
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "解决方案项", "解决方案项", "{9FA3D6BD-1EC1-3BA5-80CB-CE02773A58D5}"
 	ProjectSection(SolutionItems) = preProject
 		t.cs = t.cs
 	EndProjectSection
+EndProject
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "Common", "Common\Common.shproj", "{67E3444D-8484-4A94-8E4D-20B1194EBCBB}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -36,8 +36,8 @@ Global
 		SolutionGuid = {90CB2439-D603-43DB-B493-52FDA288B976}
 	EndGlobalSection
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
-		NetWork\NetWork.projitems*{0ecb9110-95a7-4a26-a43b-d716a3b3ffec}*SharedItemsImports = 13
-		NetWork\NetWork.projitems*{6ce06919-e3fa-41aa-a28c-69c3b1d34cc4}*SharedItemsImports = 5
-		NetWork\NetWork.projitems*{74fd4046-b9a5-4649-bbc9-ee28f7c11717}*SharedItemsImports = 5
+		Common\Common.projitems*{67e3444d-8484-4a94-8e4d-20b1194ebcbb}*SharedItemsImports = 13
+		Common\Common.projitems*{6ce06919-e3fa-41aa-a28c-69c3b1d34cc4}*SharedItemsImports = 5
+		Common\Common.projitems*{74fd4046-b9a5-4649-bbc9-ee28f7c11717}*SharedItemsImports = 5
 	EndGlobalSection
 EndGlobal

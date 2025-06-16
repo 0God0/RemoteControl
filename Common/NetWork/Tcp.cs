@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 using STcpClient = System.Net.Sockets.TcpClient;
+using Common;
 
 namespace NetWork {
     #region 委托与数据模型
@@ -34,12 +35,6 @@ namespace NetWork {
     /// </summary>
     /// <param name="client">客户端信息。</param>
     public delegate void DisconnectionHandler(ClientInfo client);
-
-    /// <summary>
-    /// 框架内部异常统一回调委托。
-    /// </summary>
-    /// <param name="ex">异常实例。</param>
-    public delegate void ErrorHandler(Exception ex);
 
     /// <summary>
     /// 自定义加密处理委托。
@@ -254,7 +249,7 @@ namespace NetWork {
         private readonly NetworkStream stream;                  // 网络流
         private readonly Dictionary<string, PacketHandler> textHandlers;   // 文本包→处理器
         private readonly Dictionary<string, BytesPacketHandler> binHandlers; // 二进制包→处理器
-        private readonly ErrorHandler onError;                  // 错误通知回调
+        private readonly UnlabeledExceptionCallback onError;                  // 错误通知回调
         private readonly EncryptionHandler encrypt;             // 上行加密（Send 时）
         private readonly DecryptionHandler decrypt;             // 下行解密（Receive 时）
         #endregion
@@ -303,7 +298,7 @@ namespace NetWork {
             STcpClient sock,
             Dictionary<string, PacketHandler> txt,
             Dictionary<string, BytesPacketHandler> bin,
-            ErrorHandler err,
+            UnlabeledExceptionCallback err,
             EncryptionHandler enc,
             DecryptionHandler dec) {
 
@@ -497,7 +492,7 @@ namespace NetWork {
     /// 轻量级 TCP 客户端封装（同步收包线程 + 线程池分发）。
     /// </summary>
     public class TcpClient {
-        private readonly ErrorHandler onError;
+        private readonly UnlabeledExceptionCallback onError;
         private readonly Dictionary<string, PacketHandler> textHandlers = new();
         private readonly Dictionary<string, BytesPacketHandler> binHandlers = new();
         private Connection conn;
@@ -508,7 +503,7 @@ namespace NetWork {
         /// 创建 <see cref="TcpClient"/>。
         /// </summary>
         /// <param name="errorHandler">统一错误回调。</param>
-        public TcpClient(ErrorHandler errorHandler)
+        public TcpClient(UnlabeledExceptionCallback errorHandler)
             => onError = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
 
         /// <summary>
@@ -578,7 +573,7 @@ namespace NetWork {
     /// 轻量级 TCP 服务器封装（每连接 1 线程，同步读，线程池分发）。
     /// </summary>
     public class TcpServer {
-        private readonly ErrorHandler onError;
+        private readonly UnlabeledExceptionCallback onError;
         private readonly Dictionary<string, PacketHandler> textHandlers = new();
         private readonly Dictionary<string, BytesPacketHandler> binHandlers = new();
         private readonly ConcurrentDictionary<string, Connection> clients = new();
@@ -587,14 +582,14 @@ namespace NetWork {
         private EncryptionHandler encrypt;
         private DecryptionHandler decrypt;
         private volatile bool running;
-        private ConnectionHandler onConnect;
-        private DisconnectionHandler onDisconnect;
+        public event ConnectionHandler onConnect;
+        public event DisconnectionHandler onDisconnect;
 
         /// <summary>
         /// 初始化 <see cref="TcpServer"/>。
         /// </summary>
         /// <param name="errorHandler">统一错误回调。</param>
-        public TcpServer(ErrorHandler errorHandler)
+        public TcpServer(UnlabeledExceptionCallback errorHandler)
             => onError = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
 
         /// <summary>
@@ -691,16 +686,6 @@ namespace NetWork {
         /// 取消指定标记的二进制包处理器。
         /// </summary>
         public void UnregisterBytesHandler(string marker) => binHandlers.Remove(marker);
-
-        /// <summary>
-        /// 注册客户端连接事件处理器（可叠加）。
-        /// </summary>
-        public void RegisterConnectionHandler(ConnectionHandler h) => onConnect += h;
-
-        /// <summary>
-        /// 注册客户端断开事件处理器（可叠加）。
-        /// </summary>
-        public void RegisterDisconnectionHandler(DisconnectionHandler h) => onDisconnect += h;
 
         /// <summary>
         /// 配置加解密回调。
